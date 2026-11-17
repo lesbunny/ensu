@@ -1,0 +1,8 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+**/key.properties
+
+# Rust
+**/target/
