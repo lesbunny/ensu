@@ -11,13 +11,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -26,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,6 +40,9 @@ import io.ente.ensu.bindings.resolveModelPolicy
 import io.ente.ensu.designsystem.EnsuColor
 import io.ente.ensu.designsystem.EnsuSpacing
 import io.ente.ensu.designsystem.EnsuTypography
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +53,7 @@ fun ModelSettingsScreen(
     onReset: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val modelPolicy =
         remember(totalMemoryBytes) {
             resolveModelPolicy(
@@ -53,24 +61,25 @@ fun ModelSettingsScreen(
                 totalMemoryBytes = totalMemoryBytes?.toULong(),
             )
         }
-    val usesSmallModel = modelPolicy.defaultModel.id == "lfm-350m"
+    var customModels by remember(state) { mutableStateOf(state.customModels) }
+    val alternateModel =
+        if (modelPolicy.defaultModel.id == "lfm-350m") {
+            ModelChoice("lfm-vl-1.6b", "LFM 2.5 VL 1.6B (Q4_0)")
+        } else {
+            ModelChoice("lfm-350m", "LFM 2.5 350M (Q4_0)")
+        }
     val modelChoices =
-        remember(modelPolicy) {
+        remember(modelPolicy, customModels) {
             listOf(
                 ModelChoice(
                     id = DEFAULT_OPTION_ID,
                     title = modelPolicy.defaultModel.title,
                     isDefault = true,
-                )
-            ) +
-                modelPolicy.visibleModels
-                    .filter { it.id != modelPolicy.defaultModel.id }
-                    .map { preset ->
-                        ModelChoice(
-                            id = preset.id,
-                            title = preset.title,
-                        )
-                    }
+                ),
+                alternateModel,
+            ) + customModels.map { model ->
+                ModelChoice(id = "custom:${model.id}", title = model.name, isCustom = true)
+            }
         }
 
     var selectedModelId by
@@ -95,8 +104,19 @@ fun ModelSettingsScreen(
         }
     var isModelMenuExpanded by remember { mutableStateOf(false) }
 
+    var showAddCustomDialog by remember { mutableStateOf(false) }
+    var customModelUrl by remember { mutableStateOf("") }
+    var isDownloadingCustomModel by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf<CustomModelDownloadProgress?>(null) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    var downloadJob by remember { mutableStateOf<Job?>(null) }
+
     val selectedModel =
         modelChoices.firstOrNull { it.id == selectedModelId } ?: modelChoices.first()
+    val isCustomSelection = selectedModel.isCustom
+    val usesSmallModel =
+        selectedModel.id == "lfm-350m" ||
+            (selectedModel.isDefault && modelPolicy.defaultModel.id == "lfm-350m")
 
     Column(
         modifier =
@@ -107,7 +127,7 @@ fun ModelSettingsScreen(
         SectionHeader("Select model")
         Spacer(modifier = Modifier.height(EnsuSpacing.xs.dp))
         Text(
-            text = "Choose a built-in model.",
+            text = "Choose either built-in model or add a custom GGUF file.",
             style = EnsuTypography.small,
             color = EnsuColor.textMuted(),
         )
@@ -140,6 +160,17 @@ fun ModelSettingsScreen(
                         },
                     )
                 }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("Add custom") },
+                    onClick = {
+                        isModelMenuExpanded = false
+                        customModelUrl = ""
+                        downloadError = null
+                        downloadProgress = null
+                        showAddCustomDialog = true
+                    },
+                )
             }
         }
 
@@ -162,7 +193,16 @@ fun ModelSettingsScreen(
                 OutlinedTextField(
                     value = contextLength,
                     onValueChange = { contextLength = it },
-                    placeholder = { Text(text = if (usesSmallModel) "2048" else "8192") },
+                    placeholder = {
+                        Text(
+                            text =
+                                when {
+                                    isCustomSelection -> "4096"
+                                    usesSmallModel -> "2048"
+                                    else -> "8192"
+                                }
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     isError = contextError != null,
                     supportingText = { contextError?.let { Text(it) } },
@@ -170,9 +210,13 @@ fun ModelSettingsScreen(
                 )
                 Text(
                     text =
-                        if (usesSmallModel)
-                            "Context is limited to 2,048 tokens on this device. Response length adjusts automatically."
-                        else "Response length adjusts automatically to the context length.",
+                        when {
+                            isCustomSelection ->
+                                "Custom models default to 4,096 tokens. Larger contexts need more memory."
+                            usesSmallModel ->
+                                "Context is limited to 2,048 tokens on this device. Response length adjusts automatically."
+                            else -> "Response length adjusts automatically to the context length."
+                        },
                     style = EnsuTypography.small,
                     color = EnsuColor.textMuted(),
                 )
@@ -212,13 +256,14 @@ fun ModelSettingsScreen(
         Spacer(modifier = Modifier.height(EnsuSpacing.lg.dp))
 
         Button(
-            enabled = contextError == null,
+            enabled = contextError == null && !isDownloadingCustomModel,
             onClick = {
                 val savedState =
                     state.copy(
                         modelId = selectedModel.id.takeUnless { selectedModel.isDefault }.orEmpty(),
                         contextLength = contextLength,
                         temperature = temperature,
+                        customModels = customModels,
                     )
                 onSave(savedState)
                 Toast.makeText(context, "Model settings saved", Toast.LENGTH_SHORT).show()
@@ -254,6 +299,126 @@ fun ModelSettingsScreen(
             color = EnsuColor.textMuted(),
         )
     }
+
+    if (showAddCustomDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isDownloadingCustomModel) showAddCustomDialog = false },
+            title = { Text("Add custom model") },
+            text = {
+                Column {
+                    Text(
+                        text = "Paste a link to one .gguf file on Hugging Face. File links work; repository links and multi-part models do not.",
+                        style = EnsuTypography.small,
+                        color = EnsuColor.textMuted(),
+                    )
+                    Spacer(modifier = Modifier.height(EnsuSpacing.sm.dp))
+                    OutlinedTextField(
+                        value = customModelUrl,
+                        onValueChange = {
+                            customModelUrl = it
+                            downloadError = null
+                        },
+                        enabled = !isDownloadingCustomModel,
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Hugging Face file link") },
+                        placeholder = {
+                            Text("https://huggingface.co/user/repo/blob/main/model.gguf")
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    )
+                    if (isDownloadingCustomModel) {
+                        Spacer(modifier = Modifier.height(EnsuSpacing.md.dp))
+                        val progress = downloadProgress
+                        val fraction = progress?.fraction
+                        if (fraction != null) {
+                            LinearProgressIndicator(
+                                progress = fraction,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Spacer(modifier = Modifier.height(EnsuSpacing.xs.dp))
+                        Text(
+                            text = progress?.let(::downloadProgressLabel) ?: "Preparing download…",
+                            style = EnsuTypography.small,
+                            color = EnsuColor.textMuted(),
+                        )
+                    }
+                    downloadError?.let { error ->
+                        Spacer(modifier = Modifier.height(EnsuSpacing.sm.dp))
+                        Text(text = error, style = EnsuTypography.small, color = EnsuColor.textMuted())
+                    }
+                    Spacer(modifier = Modifier.height(EnsuSpacing.sm.dp))
+                    Text(
+                        text = "The model is stored privately on this device. Large models can use several gigabytes and may not fit in available memory.",
+                        style = EnsuTypography.small,
+                        color = EnsuColor.textMuted(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = customModelUrl.isNotBlank() && !isDownloadingCustomModel,
+                    onClick = {
+                        downloadJob =
+                            scope.launch {
+                                isDownloadingCustomModel = true
+                                downloadError = null
+                                downloadProgress = null
+                                try {
+                                    val model =
+                                        CustomModelDownloader.download(context, customModelUrl) {
+                                            scope.launch { downloadProgress = it }
+                                        }
+                                    val updatedModels = customModels.filterNot { it.id == model.id } + model
+                                    customModels = updatedModels
+                                    selectedModelId = "custom:${model.id}"
+                                    onSave(
+                                        state.copy(
+                                            modelId = selectedModelId,
+                                            contextLength = contextLength,
+                                            temperature = temperature,
+                                            customModels = updatedModels,
+                                        )
+                                    )
+                                    showAddCustomDialog = false
+                                    customModelUrl = ""
+                                    Toast.makeText(context, "Custom model downloaded and selected", Toast.LENGTH_SHORT).show()
+                                } catch (error: CancellationException) {
+                                    // A cancelled download leaves no selectable model behind.
+                                } catch (error: Exception) {
+                                    downloadError = error.message ?: "Unable to download this model."
+                                } finally {
+                                    isDownloadingCustomModel = false
+                                    downloadJob = null
+                                }
+                            }
+                    },
+                ) {
+                    if (isDownloadingCustomModel) {
+                        CircularProgressIndicator()
+                    } else {
+                        Text("Download")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        if (isDownloadingCustomModel) {
+                            downloadJob?.cancel()
+                        } else {
+                            showAddCustomDialog = false
+                        }
+                    }
+                ) {
+                    Text(if (isDownloadingCustomModel) "Cancel download" else "Cancel")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -287,6 +452,7 @@ private data class ModelChoice(
     val id: String,
     val title: String,
     val isDefault: Boolean = false,
+    val isCustom: Boolean = false,
 )
 
 private fun initialSelectionId(
@@ -294,6 +460,27 @@ private fun initialSelectionId(
     choices: List<ModelChoice>,
 ): String {
     return choices.firstOrNull { it.id == state.modelId }?.id ?: DEFAULT_OPTION_ID
+}
+
+private fun downloadProgressLabel(progress: CustomModelDownloadProgress): String {
+    val total = progress.totalBytes
+    return if (total != null && total > 0) {
+        "${formatBytes(progress.downloadedBytes)} / ${formatBytes(total)}"
+    } else {
+        "${formatBytes(progress.downloadedBytes)} downloaded"
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val units = listOf("KB", "MB", "GB", "TB")
+    var value = bytes.toDouble()
+    var unit = -1
+    while (value >= 1024 && unit < units.lastIndex) {
+        value /= 1024
+        unit++
+    }
+    return "${"%.1f".format(value)} ${units[unit]}"
 }
 
 private const val DEFAULT_OPTION_ID = "default"

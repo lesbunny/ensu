@@ -89,6 +89,7 @@ class LlmProvider(
     private data class LoadedModelKey(
         val id: String,
         val requestedContextLength: Int?,
+        val customModelPath: String?,
     )
 
     @Volatile private var loadedModel: LlmModel? = null
@@ -120,7 +121,9 @@ class LlmProvider(
                     LlmChatModelMemory(
                         modelId = it.id,
                         modelBytes =
-                            assetStore.llmModelPath(llmAsset(it.id))?.length()?.toULong() ?: 0uL,
+                            it.customModelPath?.let(::File)?.length()?.toULong()
+                                ?: assetStore.llmModelPath(llmAsset(it.id))?.length()?.toULong()
+                                ?: 0uL,
                         contextSize = (currentContextLength ?: 12000).toUInt(),
                     )
                 }
@@ -307,7 +310,7 @@ class LlmProvider(
     class EmbeddingAssetInvalid : Exception("Embedding model asset is invalid")
 
     fun isChatModelReady(selection: LlmModelSelection): Boolean =
-        assetStore.isDownloaded(chatAsset(selection))
+        selection.customModelPath?.let { File(it).isFile } ?: assetStore.isDownloaded(chatAsset(selection))
 
     fun isEmbeddingModelReady(): Boolean = assetStore.isDownloaded(embeddingAsset)
 
@@ -315,7 +318,7 @@ class LlmProvider(
         assetStore.estimateDownloadSize(embeddingAsset)
 
     suspend fun estimateChatModelDownloadSize(selection: LlmModelSelection): Long? =
-        assetStore.estimateDownloadSize(chatAsset(selection))
+        if (selection.customModelPath != null) 0L else assetStore.estimateDownloadSize(chatAsset(selection))
 
     val isDownloadActive: Boolean
         get() = activeDownloads.get() > 0
@@ -325,6 +328,12 @@ class LlmProvider(
         onProgress: (DownloadProgress) -> Unit,
     ) {
         deviceCapabilityProvider.chatCapability().requireChatSupported()
+        val customPath = selection.customModelPath
+        if (customPath != null) {
+            if (!File(customPath).isFile) throw RequiredModelValidationError(selection.id)
+            onProgress(DownloadProgress(100, "Custom model ready", phase = DownloadPhase.Ready))
+            return
+        }
         val asset = chatAsset(selection)
         downloadAssets(listOf(asset), onProgress)
         if (!assetStore.isDownloaded(asset)) throw RequiredModelValidationError(selection.id)
@@ -405,7 +414,11 @@ class LlmProvider(
     ) {
         withModelContext {
             deviceCapabilityProvider.chatCapability().requireChatSupported()
-            val asset = chatAsset(selection)
+            if (selection.customModelPath?.let { !File(it).isFile } == true) {
+                throw RequiredModelValidationError(selection.id)
+            }
+            val asset: Asset? =
+                if (selection.customModelPath != null) null else chatAsset(selection)
             val missingAssets = modelLoadMutex.withLock {
                 val embeddingReady = isEmbeddingModelReady()
                 if (IS_ENSU_PACKS_ENABLED && !embeddingReady) {
@@ -416,7 +429,7 @@ class LlmProvider(
                 }
 
                 buildList {
-                    if (!assetStore.isDownloaded(asset)) add(asset)
+                    if (asset != null && !assetStore.isDownloaded(asset)) add(asset)
                     if (IS_ENSU_PACKS_ENABLED && !isEmbeddingModelReady()) add(embeddingAsset)
                 }
             }
@@ -428,7 +441,7 @@ class LlmProvider(
                     assetStore.removeDownloaded(embeddingAsset)
                     throw RequiredModelValidationError(knowledgeEmbedding.targetId)
                 }
-                if (!assetStore.isDownloaded(asset)) {
+                if (asset != null && !assetStore.isDownloaded(asset)) {
                     throw RequiredModelValidationError(selection.id)
                 }
                 ensureModelReadyLocked(
@@ -452,7 +465,9 @@ class LlmProvider(
     ): GenerationSummary {
         deviceCapabilityProvider.chatCapability().requireChatSupported()
         currentJobId = null
-        val mmprojPath = assetStore.llmMmprojPath(chatAsset(selection))?.absolutePath
+        val mmprojPath =
+            if (selection.customModelPath != null) null
+            else assetStore.llmMmprojPath(chatAsset(selection))?.absolutePath
         if (imageFiles.isNotEmpty() && mmprojPath == null) {
             throw ModelImagesUnsupported()
         }
@@ -660,7 +675,7 @@ class LlmProvider(
         }
 
     fun loadedContextLength(selection: LlmModelSelection): Int? {
-        val modelKey = LoadedModelKey(selection.id, selection.contextLength)
+        val modelKey = LoadedModelKey(selection.id, selection.contextLength, selection.customModelPath)
         return if (currentModelKey == modelKey && loadedContext != null && loadedModel != null) {
             currentContextLength
         } else {
@@ -713,7 +728,7 @@ class LlmProvider(
     ) {
         chatWarmupOwner = null
         deviceCapabilityProvider.chatCapability().requireChatSupported()
-        val modelKey = LoadedModelKey(selection.id, selection.contextLength)
+        val modelKey = LoadedModelKey(selection.id, selection.contextLength, selection.customModelPath)
         if (!backendInitialized) {
             llmInitBackendFromDirectory(nativeLibraryDir)
             backendInitialized = true
@@ -726,22 +741,29 @@ class LlmProvider(
         unloadTranscriptionModelIfLoaded()
         unloadModel()
 
-        val asset = chatAsset(selection)
-        val wasAlreadyDownloaded = assetStore.isDownloaded(asset)
-        if (shouldDownload) {
-            downloadAssets(listOf(asset), onProgress)
+        val customModelFile = selection.customModelPath?.let(::File)
+        if (customModelFile != null && !customModelFile.isFile) {
+            throw RequiredModelValidationError(selection.id)
+        }
+        val asset: Asset? = if (customModelFile == null) chatAsset(selection) else null
+        val wasAlreadyDownloaded =
+            if (asset != null) assetStore.isDownloaded(asset) else customModelFile?.isFile == true
+        if (asset != null) {
+            if (shouldDownload) downloadAssets(listOf(asset), onProgress)
+            assetStore.cleanupObsoleteChatModels(selection.id)
         }
 
-        assetStore.cleanupObsoleteChatModels(selection.id)
-
         onProgress(DownloadProgress(100, "Loading model...", phase = DownloadPhase.Loading))
+        val modelFile = customModelFile ?: requireNotNull(asset?.let { assetStore.llmModelPath(it) })
         try {
-            loadWithFallbacks(
-                selection,
-                requireNotNull(assetStore.llmModelPath(asset)),
-            )
+            loadWithFallbacks(selection, modelFile)
         } catch (error: Throwable) {
-            if (allowRecovery && wasAlreadyDownloaded && assetStore.removeDownloaded(asset)) {
+            if (
+                asset != null &&
+                    allowRecovery &&
+                    wasAlreadyDownloaded &&
+                    assetStore.removeDownloaded(asset)
+            ) {
                 onProgress(
                     DownloadProgress(0, "Starting download...", phase = DownloadPhase.Downloading)
                 )
@@ -775,7 +797,8 @@ class LlmProvider(
     private fun chatAsset(selection: LlmModelSelection): Asset = llmAsset(selection.id)
 
     fun supportsImages(selection: LlmModelSelection): Boolean =
-        assetStore.llmMmprojPath(chatAsset(selection)) != null
+        selection.customModelPath == null &&
+            assetStore.llmMmprojPath(chatAsset(selection)) != null
 
     private fun generationThreads(): Int =
         (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 3)
@@ -843,7 +866,7 @@ class LlmProvider(
                     )
                 loadedContext = model.newContext(contextParams)
                 loadedContext?.setExecutionControl(executionControl)
-                currentModelKey = LoadedModelKey(selection.id, selection.contextLength)
+                currentModelKey = LoadedModelKey(selection.id, selection.contextLength, selection.customModelPath)
                 currentContextLength = loadedContext?.contextSize()?.toInt()
                 updateExecutionPolicy()
                 return

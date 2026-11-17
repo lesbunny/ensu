@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import io.ente.ensu.llm.CustomModel
 import io.ente.ensu.llm.ModelSettingsState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +14,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 private val Context.advancedSettingsPreferences by preferencesDataStore("ensu_advanced_settings")
 
@@ -37,6 +41,9 @@ class AdvancedSettingsDataStore(private val context: Context) {
                         modelId = prefs[Keys.modelId].orEmpty(),
                         contextLength = prefs[Keys.contextLength].orEmpty(),
                         temperature = prefs[Keys.temperature].orEmpty(),
+                        customModels = runCatching {
+                            Json.decodeFromString<List<CustomModel>>(prefs[Keys.customModels].orEmpty())
+                        }.getOrDefault(emptyList()),
                     ),
             )
         }
@@ -84,6 +91,7 @@ class AdvancedSettingsDataStore(private val context: Context) {
             prefs[Keys.contextLength] = settings.contextLength
             prefs.remove(Keys.legacyMaxTokens)
             prefs[Keys.temperature] = settings.temperature
+            prefs[Keys.customModels] = Json.encodeToString(settings.customModels)
         }
     }
 
@@ -112,6 +120,7 @@ class AdvancedSettingsDataStore(private val context: Context) {
             val contextLength = stringPreferencesKey("context_length")
             val legacyMaxTokens = stringPreferencesKey("max_tokens")
             val temperature = stringPreferencesKey("temperature")
+            val customModels = stringPreferencesKey("custom_models")
         }
     }
 }

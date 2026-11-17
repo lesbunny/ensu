@@ -73,7 +73,11 @@ internal class ModelSettingsActions(
     }
 
     fun resetModelSettings() {
-        state.update { appState -> appState.copy(modelSettings = ModelSettingsState()) }
+        state.update { appState ->
+            appState.copy(
+                modelSettings = ModelSettingsState(customModels = appState.modelSettings.customModels)
+            )
+        }
         refreshModelDownloadInfo()
     }
 
@@ -501,18 +505,26 @@ internal class ModelSettingsActions(
     }
 
     fun resolveSelection(settings: ModelSettingsState): LlmModelSelection {
+        val contextLength = settings.contextLength.toIntOrNull()
+        val customModel = settings.customModels.firstOrNull {
+            settings.modelId == "custom:${it.id}"
+        }
+        if (customModel != null) {
+            return LlmModelSelection(
+                id = "custom:${customModel.id}",
+                contextLength = contextLength,
+                customModelPath = customModel.path,
+            )
+        }
+
         val modelId =
             resolveEffectiveModelId(
                 surface = ModelRuntimeSurface.ANDROID,
                 totalMemoryBytes = state.value.chat.deviceCapability.totalMemoryBytes?.toULong(),
                 preferredModelId = settings.modelId.takeIf { it.isNotEmpty() },
             )
-        val contextLength = settings.contextLength.toIntOrNull()
 
-        return LlmModelSelection(
-            id = modelId,
-            contextLength = contextLength,
-        )
+        return LlmModelSelection(id = modelId, contextLength = contextLength)
     }
 
     fun resolveTemperature(settings: ModelSettingsState): Float {

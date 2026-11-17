@@ -223,10 +223,15 @@ pub fn resolve_model_policy(
             Some(bytes) if bytes > MOBILE_SMALL_MEMORY_MAX_BYTES => lfm_vl_1_6b(),
             _ => lfm_350m(),
         };
+        let alternate = if model.id == "lfm-350m" {
+            lfm_vl_1_6b()
+        } else {
+            lfm_350m()
+        };
         return ResolvedModelPolicy {
             default_model: model.clone(),
-            visible_models: vec![model.clone()],
-            allowed_preferred_models: vec![model],
+            visible_models: vec![model.clone(), alternate.clone()],
+            allowed_preferred_models: vec![model, alternate],
         };
     }
 
@@ -390,21 +395,40 @@ mod tests {
                 let policy = resolve_model_policy(surface, memory);
                 assert_eq!(supports_live_voice(memory), live_voice, "RAM: {memory:?}");
                 assert_eq!(policy.default_model.id, expected, "RAM: {memory:?}");
-                assert_eq!(policy.visible_models.len(), 1);
+                let alternate = if expected == "lfm-350m" {
+                    "lfm-vl-1.6b"
+                } else {
+                    "lfm-350m"
+                };
+                assert_eq!(policy.visible_models.len(), 2);
                 assert_eq!(policy.visible_models[0].id, expected);
-                assert_eq!(policy.allowed_preferred_models.len(), 1);
+                assert_eq!(policy.visible_models[1].id, alternate);
+                assert_eq!(policy.allowed_preferred_models.len(), 2);
                 assert_eq!(
                     policy.default_model.mmproj_url.is_none(),
                     expected == "lfm-350m"
                 );
-                for preferred in [None, Some("unknown")]
-                    .into_iter()
-                    .chain(llm_catalog().iter().map(|model| Some(model.id.as_str())))
-                {
+                for preferred in [None, Some("unknown")] {
                     assert_eq!(
                         resolve_effective_model(surface, memory, preferred).id,
                         expected,
                         "RAM: {memory:?}, preference: {preferred:?}"
+                    );
+                }
+                assert_eq!(
+                    resolve_effective_model(surface, memory, Some(expected)).id,
+                    expected
+                );
+                assert_eq!(
+                    resolve_effective_model(surface, memory, Some(alternate)).id,
+                    alternate
+                );
+                for preset in llm_catalog().iter().filter(|preset| {
+                    preset.id != expected && preset.id != alternate
+                }) {
+                    assert_eq!(
+                        resolve_effective_model(surface, memory, Some(preset.id.as_str())).id,
+                        expected
                     );
                 }
             }
