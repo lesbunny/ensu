@@ -76,10 +76,11 @@ build_abi() {
     export "AR_${lower}=$TOOLCHAIN/bin/llvm-ar"
     export "RANLIB_${lower}=$TOOLCHAIN/bin/llvm-ranlib"
 
-    # llama-cpp-sys-2 0.1.158 hard-links dynamic libraries into
-    # target/<triple>/release/deps from its build script. Cargo may not have
-    # created that directory yet during a cross-compile, so create it first.
-    mkdir -p "$TARGET_DIR/$target/release/deps"
+    # llama-cpp-sys-2 0.1.158 derives its target_dir from OUT_DIR. Its
+    # OUT_DIR.ancestors().nth(3) resolves to target/<triple>/release/build,
+    # so its dynamic-link build step hard-links libraries into release/build/deps.
+    # Cargo may not have created that directory yet during this cross-compile.
+    mkdir -p "$TARGET_DIR/$target/release/build/deps"
 
     local out=$OUT_DIR/$abi
     mkdir -p "$out"
