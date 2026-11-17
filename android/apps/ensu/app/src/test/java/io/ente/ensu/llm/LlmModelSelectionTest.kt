@@ -15,6 +15,10 @@ class LlmModelSelectionTest {
         assertEquals(listOf(12000, 8192, 4096, 2048, 1024), standard.contextCandidates())
         assertEquals(512, standard.batchSize)
 
+        val gemma = LlmModelSelection("gemma-4-e2b-q4km")
+        assertEquals(listOf(8192, 4096, 2048, 1024), gemma.contextCandidates())
+        assertEquals(256, gemma.batchSize)
+
         val custom = LlmModelSelection("custom:test", customModelPath = "/models/custom.gguf")
         assertEquals(listOf(4096, 2048, 1024), custom.contextCandidates())
         assertEquals(256, custom.batchSize)

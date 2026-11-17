@@ -14,18 +14,27 @@ data class LlmModelSelection(
     private val isCustomModel: Boolean
         get() = customModelPath != null
 
+    private val isGemmaModel: Boolean
+        get() = id == "gemma-4-e2b-q4km"
+
     val batchSize: Int
-        get() = if (isSmallModel) 128 else if (isCustomModel) 256 else 512
+        get() = when {
+            isSmallModel -> 128
+            isCustomModel || isGemmaModel -> 256
+            else -> 512
+        }
 
     fun contextCandidates(): List<Int> {
         val defaultContext =
             when {
                 isSmallModel -> 2048
                 isCustomModel -> 4096
+                isGemmaModel -> 8192
                 else -> 12000
             }
         val requested = contextLength?.takeIf { it > 0 } ?: defaultContext
-        val desired = if (isSmallModel) minOf(requested, defaultContext) else requested
+        val desired =
+            if (isSmallModel || isGemmaModel) minOf(requested, defaultContext) else requested
         return (listOf(desired) + listOf(12000, 8192, 4096, 2048, 1024)).distinct().filter {
             it <= desired
         }

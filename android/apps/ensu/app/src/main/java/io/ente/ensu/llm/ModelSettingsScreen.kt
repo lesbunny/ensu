@@ -62,12 +62,6 @@ fun ModelSettingsScreen(
             )
         }
     var customModels by remember(state) { mutableStateOf(state.customModels) }
-    val alternateModel =
-        if (modelPolicy.defaultModel.id == "lfm-350m") {
-            ModelChoice("lfm-vl-1.6b", "LFM 2.5 VL 1.6B (Q4_0)")
-        } else {
-            ModelChoice("lfm-350m", "LFM 2.5 350M (Q4_0)")
-        }
     val modelChoices =
         remember(modelPolicy, customModels) {
             listOf(
@@ -75,11 +69,14 @@ fun ModelSettingsScreen(
                     id = DEFAULT_OPTION_ID,
                     title = modelPolicy.defaultModel.title,
                     isDefault = true,
-                ),
-                alternateModel,
-            ) + customModels.map { model ->
-                ModelChoice(id = "custom:${model.id}", title = model.name, isCustom = true)
-            }
+                )
+            ) +
+                modelPolicy.visibleModels
+                    .filter { it.id != modelPolicy.defaultModel.id }
+                    .map { model -> ModelChoice(id = model.id, title = model.title) } +
+                customModels.map { model ->
+                    ModelChoice(id = "custom:${model.id}", title = model.name, isCustom = true)
+                }
         }
 
     var selectedModelId by
@@ -117,6 +114,9 @@ fun ModelSettingsScreen(
     val usesSmallModel =
         selectedModel.id == "lfm-350m" ||
             (selectedModel.isDefault && modelPolicy.defaultModel.id == "lfm-350m")
+    val usesGemmaModel =
+        selectedModel.id == "gemma-4-e2b-q4km" ||
+            (selectedModel.isDefault && modelPolicy.defaultModel.id == "gemma-4-e2b-q4km")
 
     Column(
         modifier =
@@ -215,6 +215,8 @@ fun ModelSettingsScreen(
                                 "Custom models default to 4,096 tokens. Larger contexts need more memory."
                             usesSmallModel ->
                                 "Context is limited to 2,048 tokens on this device. Response length adjusts automatically."
+                            usesGemmaModel ->
+                                "Gemma 4 E2B defaults to 8,192 tokens and a smaller batch size to reduce memory use."
                             else -> "Response length adjusts automatically to the context length."
                         },
                     style = EnsuTypography.small,
